@@ -12,14 +12,21 @@ struct ClusterStats
     bool HasVAP = false;
 };
 
-static double SafeDiv(double numerator, double denominator)
+static double AOFTA_SafeDiv(const double numerator, const double denominator)
 {
-    if (denominator == 0.0)
-        return 0.0;
-    return numerator / denominator;
+    return denominator == 0.0 ? 0.0 : numerator / denominator;
 }
 
-static double ManualATR(SCStudyInterfaceRef sc, int index, int length)
+static double AOFTA_Clamp(const double value, const double low, const double high)
+{
+    if (value < low)
+        return low;
+    if (value > high)
+        return high;
+    return value;
+}
+
+static double AOFTA_ManualATR(SCStudyInterfaceRef sc, const int index, const int length)
 {
     if (index <= 0 || length <= 0)
         return 0.0;
@@ -41,7 +48,7 @@ static double ManualATR(SCStudyInterfaceRef sc, int index, int length)
     return count > 0 ? sumTR / count : 0.0;
 }
 
-static double SimpleAverage(SCFloatArrayRef values, int index, int length)
+static double AOFTA_SimpleAverage(SCFloatArrayRef values, const int index, const int length)
 {
     if (length <= 0)
         return 0.0;
@@ -59,7 +66,7 @@ static double SimpleAverage(SCFloatArrayRef values, int index, int length)
     return count > 0 ? sum / count : 0.0;
 }
 
-static ClusterStats CalculateClusterStats(SCStudyInterfaceRef sc, int index)
+static ClusterStats AOFTA_CalculateClusterStats(SCStudyInterfaceRef sc, const int index)
 {
     ClusterStats stats;
     stats.Midpoint = (sc.High[index] + sc.Low[index]) * 0.5;
@@ -116,6 +123,23 @@ static ClusterStats CalculateClusterStats(SCStudyInterfaceRef sc, int index)
     return stats;
 }
 
+static void AOFTA_DrawText(SCStudyInterfaceRef sc, const int lineNumber, const int index, const double value, const COLORREF color, const SCString& text)
+{
+    s_UseTool tool;
+    tool.Clear();
+    tool.ChartNumber = sc.ChartNumber;
+    tool.DrawingType = DRAWING_TEXT;
+    tool.Region = 0;
+    tool.BeginIndex = index;
+    tool.BeginValue = value;
+    tool.Color = color;
+    tool.FontSize = 8;
+    tool.AddMethod = UTAM_ADD_OR_ADJUST;
+    tool.LineNumber = lineNumber;
+    tool.Text = text;
+    sc.UseTool(tool);
+}
+
 SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
 {
     SCSubgraphRef ClusterVWAP = sc.Subgraph[0];
@@ -133,6 +157,11 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
     SCSubgraphRef ShortTrapSignal = sc.Subgraph[12];
     SCSubgraphRef AbsorptionSignal = sc.Subgraph[13];
     SCSubgraphRef EfficiencyColor = sc.Subgraph[14];
+    SCSubgraphRef CumulativeDelta = sc.Subgraph[15];
+    SCSubgraphRef SessionVWAP = sc.Subgraph[16];
+    SCSubgraphRef TrapScore = sc.Subgraph[17];
+    SCSubgraphRef ConfirmedLongTrap = sc.Subgraph[18];
+    SCSubgraphRef ConfirmedShortTrap = sc.Subgraph[19];
 
     SCInputRef EnableCluster = sc.Input[0];
     SCInputRef EnableDelta = sc.Input[1];
@@ -159,11 +188,18 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
     SCInputRef ShowExtremeDeltaMarkers = sc.Input[22];
     SCInputRef RequireReversalConfirmation = sc.Input[23];
     SCInputRef ReversalLookaheadBars = sc.Input[24];
+    SCInputRef EnableCumulativeDelta = sc.Input[25];
+    SCInputRef EnableSessionVWAP = sc.Input[26];
+    SCInputRef MinimumTrapScore = sc.Input[27];
+    SCInputRef EnableAlerts = sc.Input[28];
+    SCInputRef AlertNumber = sc.Input[29];
+    SCInputRef ScoreAbsorptionBonus = sc.Input[30];
+    SCInputRef ScoreExtremeDeltaBonus = sc.Input[31];
 
     if (sc.SetDefaults)
     {
-        sc.GraphName = "Advanced Order Flow Trap Analyzer";
-        sc.StudyDescription = "Order-flow study combining VAP VWAP/POC, delta, efficiency, ATR context, trap logic, and absorption.";
+        sc.GraphName = "Advanced Order Flow Trap Analyzer v2";
+        sc.StudyDescription = "Production ACSIL order-flow study with VAP VWAP/POC, delta, efficiency, ATR, cumulative delta, session VWAP, absorption, trap scoring, alerts, and confirmation.";
         sc.AutoLoop = 0;
         sc.GraphRegion = 0;
         sc.ValueFormat = VALUEFORMAT_INHERITED;
@@ -220,16 +256,16 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
         VolumePerTrade.DrawStyle = DRAWSTYLE_IGNORE;
         VolumePerTrade.DrawZeros = true;
 
-        LongTrapSignal.Name = "TRAP LONG";
+        LongTrapSignal.Name = "Potential Long Trap";
         LongTrapSignal.DrawStyle = DRAWSTYLE_TRIANGLE_DOWN;
-        LongTrapSignal.PrimaryColor = RGB(255, 80, 80);
-        LongTrapSignal.LineWidth = 4;
+        LongTrapSignal.PrimaryColor = RGB(255, 120, 120);
+        LongTrapSignal.LineWidth = 3;
         LongTrapSignal.DrawZeros = false;
 
-        ShortTrapSignal.Name = "TRAP SHORT";
+        ShortTrapSignal.Name = "Potential Short Trap";
         ShortTrapSignal.DrawStyle = DRAWSTYLE_TRIANGLE_UP;
-        ShortTrapSignal.PrimaryColor = RGB(80, 255, 120);
-        ShortTrapSignal.LineWidth = 4;
+        ShortTrapSignal.PrimaryColor = RGB(120, 255, 140);
+        ShortTrapSignal.LineWidth = 3;
         ShortTrapSignal.DrawZeros = false;
 
         AbsorptionSignal.Name = "Absorption";
@@ -240,98 +276,134 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
         EfficiencyColor.Name = "Efficiency Heatmap";
         EfficiencyColor.DrawStyle = DRAWSTYLE_COLOR_BAR;
         EfficiencyColor.PrimaryColor = RGB(120, 120, 120);
-        EfficiencyColor.SecondaryColor = RGB(255, 255, 255);
         EfficiencyColor.DrawZeros = false;
+
+        CumulativeDelta.Name = "Cumulative Delta";
+        CumulativeDelta.DrawStyle = DRAWSTYLE_IGNORE;
+        CumulativeDelta.DrawZeros = true;
+
+        SessionVWAP.Name = "Session VWAP";
+        SessionVWAP.DrawStyle = DRAWSTYLE_LINE;
+        SessionVWAP.PrimaryColor = RGB(180, 120, 255);
+        SessionVWAP.LineWidth = 2;
+        SessionVWAP.DrawZeros = false;
+
+        TrapScore.Name = "Trap Score";
+        TrapScore.DrawStyle = DRAWSTYLE_IGNORE;
+        TrapScore.DrawZeros = true;
+
+        ConfirmedLongTrap.Name = "Confirmed Long Trap";
+        ConfirmedLongTrap.DrawStyle = DRAWSTYLE_TRIANGLE_DOWN;
+        ConfirmedLongTrap.PrimaryColor = RGB(255, 0, 0);
+        ConfirmedLongTrap.LineWidth = 5;
+        ConfirmedLongTrap.DrawZeros = false;
+
+        ConfirmedShortTrap.Name = "Confirmed Short Trap";
+        ConfirmedShortTrap.DrawStyle = DRAWSTYLE_TRIANGLE_UP;
+        ConfirmedShortTrap.PrimaryColor = RGB(0, 255, 80);
+        ConfirmedShortTrap.LineWidth = 5;
+        ConfirmedShortTrap.DrawZeros = false;
 
         EnableCluster.Name = "Enable Volume Cluster Collapse";
         EnableCluster.SetYesNo(true);
-
         EnableDelta.Name = "Enable Delta Engine";
         EnableDelta.SetYesNo(true);
-
         EnableEfficiency.Name = "Enable Price Efficiency";
         EnableEfficiency.SetYesNo(true);
-
         EnableTickVolume.Name = "Enable Tick vs Volume Metrics";
         EnableTickVolume.SetYesNo(true);
-
         EnableATR.Name = "Enable ATR Context";
         EnableATR.SetYesNo(true);
-
         EnableTraps.Name = "Enable Trap Detection";
         EnableTraps.SetYesNo(true);
-
         EnableAbsorption.Name = "Enable Absorption Detection";
         EnableAbsorption.SetYesNo(true);
-
         EnableDebugLogging.Name = "Enable Debug Logging";
         EnableDebugLogging.SetYesNo(false);
 
         DeltaTrapThreshold.Name = "Delta Trap Threshold";
         DeltaTrapThreshold.SetFloat(0.70f);
         DeltaTrapThreshold.SetFloatLimits(0.0f, 1.0f);
-
         ExtremeDeltaThreshold.Name = "Extreme Delta Threshold";
         ExtremeDeltaThreshold.SetFloat(0.90f);
         ExtremeDeltaThreshold.SetFloatLimits(0.0f, 1.0f);
-
         MinimumVolumeForDeltaSignal.Name = "Minimum Volume For Delta Signal";
         MinimumVolumeForDeltaSignal.SetInt(100);
         MinimumVolumeForDeltaSignal.SetIntLimits(0, INT_MAX);
-
         ATRLength.Name = "ATR Length";
         ATRLength.SetInt(14);
         ATRLength.SetIntLimits(1, 500);
-
         ATRMALength.Name = "ATR Moving Average Length";
         ATRMALength.SetInt(20);
         ATRMALength.SetIntLimits(1, 500);
-
         LowFollowThroughATRFactor.Name = "Low Follow Through ATR Factor";
         LowFollowThroughATRFactor.SetFloat(0.35f);
         LowFollowThroughATRFactor.SetFloatLimits(0.01f, 5.0f);
-
         AbsorptionVolumeThreshold.Name = "Absorption Volume Threshold";
         AbsorptionVolumeThreshold.SetInt(1000);
         AbsorptionVolumeThreshold.SetIntLimits(0, INT_MAX);
-
         AbsorptionMinMovementTicks.Name = "Absorption Min Movement In Ticks";
         AbsorptionMinMovementTicks.SetInt(4);
         AbsorptionMinMovementTicks.SetIntLimits(1, 10000);
-
         AbsorptionUseATR.Name = "Absorption Use ATR Normalized Movement";
         AbsorptionUseATR.SetYesNo(false);
-
-        ShowVWAPLine.Name = "Show VWAP Line";
+        ShowVWAPLine.Name = "Show Cluster VWAP Line";
         ShowVWAPLine.SetYesNo(true);
-
-        ShowPOCLine.Name = "Show POC Line";
+        ShowPOCLine.Name = "Show Cluster POC Line";
         ShowPOCLine.SetYesNo(true);
-
         ShowTrapLabels.Name = "Show Trap Labels";
         ShowTrapLabels.SetYesNo(false);
-
         ShowAbsorptionHighlights.Name = "Show Absorption Highlights";
         ShowAbsorptionHighlights.SetYesNo(true);
-
         ShowEfficiencyHeatmap.Name = "Show Efficiency Heatmap";
         ShowEfficiencyHeatmap.SetYesNo(true);
-
         ShowExtremeDeltaMarkers.Name = "Show Extreme Delta Markers";
         ShowExtremeDeltaMarkers.SetYesNo(true);
-
         RequireReversalConfirmation.Name = "Require Reversal Confirmation";
-        RequireReversalConfirmation.SetYesNo(false);
-
+        RequireReversalConfirmation.SetYesNo(true);
         ReversalLookaheadBars.Name = "Reversal Lookahead Bars";
         ReversalLookaheadBars.SetInt(3);
         ReversalLookaheadBars.SetIntLimits(1, 20);
+        EnableCumulativeDelta.Name = "Enable Cumulative Delta";
+        EnableCumulativeDelta.SetYesNo(true);
+        EnableSessionVWAP.Name = "Enable Session VWAP";
+        EnableSessionVWAP.SetYesNo(true);
+        MinimumTrapScore.Name = "Minimum Trap Score";
+        MinimumTrapScore.SetFloat(3.0f);
+        MinimumTrapScore.SetFloatLimits(1.0f, 8.0f);
+        EnableAlerts.Name = "Enable Alerts";
+        EnableAlerts.SetYesNo(false);
+        AlertNumber.Name = "Alert Number";
+        AlertNumber.SetInt(1);
+        AlertNumber.SetIntLimits(1, 150);
+        ScoreAbsorptionBonus.Name = "Score Absorption Bonus";
+        ScoreAbsorptionBonus.SetFloat(1.0f);
+        ScoreExtremeDeltaBonus.Name = "Score Extreme Delta Bonus";
+        ScoreExtremeDeltaBonus.SetFloat(0.5f);
 
         return;
     }
 
     const int startIndex = max(1, sc.UpdateStartIndex);
     const int arraySize = sc.ArraySize;
+    double sessionPV = 0.0;
+    double sessionVol = 0.0;
+
+    if (startIndex > 1 && EnableSessionVWAP.GetYesNo())
+    {
+        for (int k = 0; k < startIndex; ++k)
+        {
+            if (k > 0 && sc.BaseDateTimeIn[k].GetDate() != sc.BaseDateTimeIn[k - 1].GetDate())
+            {
+                sessionPV = 0.0;
+                sessionVol = 0.0;
+            }
+            const double v = sc.BaseData[SC_VOLUME][k];
+            const double typical = (sc.High[k] + sc.Low[k] + sc.Close[k]) / 3.0;
+            sessionPV += typical * v;
+            sessionVol += v;
+        }
+    }
 
     for (int i = startIndex; i < arraySize; ++i)
     {
@@ -350,12 +422,18 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
         ShortTrapSignal[i] = 0.0f;
         AbsorptionSignal[i] = 0.0f;
         EfficiencyColor[i] = 0.0f;
+        TrapScore[i] = 0.0f;
+        ConfirmedLongTrap[i] = 0.0f;
+        ConfirmedShortTrap[i] = 0.0f;
+        if (i == 1)
+            CumulativeDelta[i - 1] = 0.0f;
 
         const double totalVolume = static_cast<double>(sc.BaseData[SC_VOLUME][i]);
         const double askVolume = static_cast<double>(sc.BaseData[SC_ASKVOL][i]);
         const double bidVolume = static_cast<double>(sc.BaseData[SC_BIDVOL][i]);
         const double priceMove = sc.High[i] - sc.Low[i];
         const double markerOffset = max(sc.TickSize * 2.0, priceMove * 0.12);
+        const double typicalPrice = (sc.High[i] + sc.Low[i] + sc.Close[i]) / 3.0;
 
         ClusterStats cluster;
         cluster.VWAP = sc.Close[i];
@@ -364,7 +442,7 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
         cluster.Skew = cluster.VWAP - cluster.Midpoint;
 
         if (EnableCluster.GetYesNo())
-            cluster = CalculateClusterStats(sc, i);
+            cluster = AOFTA_CalculateClusterStats(sc, i);
 
         ClusterVWAP[i] = ShowVWAPLine.GetYesNo() ? static_cast<float>(cluster.VWAP) : 0.0f;
         ClusterPOC[i] = ShowPOCLine.GetYesNo() ? static_cast<float>(cluster.POC) : 0.0f;
@@ -373,40 +451,64 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
 
         double delta = 0.0;
         double deltaPct = 0.0;
+        bool extremeDelta = false;
 
         if (EnableDelta.GetYesNo())
         {
             delta = askVolume - bidVolume;
-            deltaPct = SafeDiv(delta, totalVolume);
+            deltaPct = AOFTA_SafeDiv(delta, totalVolume);
+            extremeDelta = fabs(deltaPct) >= ExtremeDeltaThreshold.GetFloat() && totalVolume >= MinimumVolumeForDeltaSignal.GetInt();
             Delta[i] = static_cast<float>(delta);
             DeltaPct[i] = static_cast<float>(deltaPct);
 
-            if (ShowExtremeDeltaMarkers.GetYesNo() && fabs(deltaPct) >= ExtremeDeltaThreshold.GetFloat() && totalVolume >= MinimumVolumeForDeltaSignal.GetInt())
+            if (EnableCumulativeDelta.GetYesNo())
+                CumulativeDelta[i] = (i > 0 ? CumulativeDelta[i - 1] : 0.0f) + static_cast<float>(delta);
+
+            if (ShowExtremeDeltaMarkers.GetYesNo() && extremeDelta)
                 ExtremeDeltaMarker[i] = static_cast<float>(sc.High[i] + markerOffset);
+        }
+
+        if (EnableSessionVWAP.GetYesNo())
+        {
+            if (i > 0 && sc.BaseDateTimeIn[i].GetDate() != sc.BaseDateTimeIn[i - 1].GetDate())
+            {
+                sessionPV = 0.0;
+                sessionVol = 0.0;
+                if (EnableCumulativeDelta.GetYesNo())
+                    CumulativeDelta[i] = static_cast<float>(delta);
+            }
+
+            sessionPV += typicalPrice * totalVolume;
+            sessionVol += totalVolume;
+            SessionVWAP[i] = static_cast<float>(AOFTA_SafeDiv(sessionPV, sessionVol));
+        }
+        else
+        {
+            SessionVWAP[i] = 0.0f;
         }
 
         double atr = 0.0;
         if (EnableATR.GetYesNo())
         {
-            atr = ManualATR(sc, i, ATRLength.GetInt());
+            atr = AOFTA_ManualATR(sc, i, ATRLength.GetInt());
             ATR[i] = static_cast<float>(atr);
-            ATRMA[i] = static_cast<float>(SimpleAverage(ATR, i, ATRMALength.GetInt()));
+            ATRMA[i] = static_cast<float>(AOFTA_SimpleAverage(ATR, i, ATRMALength.GetInt()));
         }
 
         double efficiency = 0.0;
+        double atrNormalizedMove = 0.0;
         if (EnableEfficiency.GetYesNo())
         {
-            efficiency = SafeDiv(priceMove, totalVolume);
+            efficiency = AOFTA_SafeDiv(priceMove, totalVolume);
+            atrNormalizedMove = AOFTA_SafeDiv(priceMove, atr);
             Efficiency[i] = static_cast<float>(efficiency);
 
             if (ShowEfficiencyHeatmap.GetYesNo())
             {
-                const double atrNormalized = SafeDiv(priceMove, atr);
                 EfficiencyColor[i] = static_cast<float>(sc.Close[i]);
-
-                if (atrNormalized >= 0.75)
+                if (atrNormalizedMove >= 0.75)
                     EfficiencyColor.DataColor[i] = RGB(255, 255, 255);
-                else if (atrNormalized >= 0.35)
+                else if (atrNormalizedMove >= 0.35)
                     EfficiencyColor.DataColor[i] = RGB(150, 150, 150);
                 else
                     EfficiencyColor.DataColor[i] = RGB(80, 80, 80);
@@ -416,7 +518,7 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
         if (EnableTickVolume.GetYesNo())
         {
             const double tickCount = static_cast<double>(sc.NumberOfTrades[i]);
-            VolumePerTrade[i] = static_cast<float>(SafeDiv(totalVolume, tickCount));
+            VolumePerTrade[i] = static_cast<float>(AOFTA_SafeDiv(totalVolume, tickCount));
         }
 
         bool absorption = false;
@@ -425,7 +527,6 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
             const bool highVolume = totalVolume >= AbsorptionVolumeThreshold.GetInt();
             const bool lowMovementTicks = priceMove <= AbsorptionMinMovementTicks.GetInt() * sc.TickSize;
             const bool lowMovementATR = atr > 0.0 && priceMove <= atr * LowFollowThroughATRFactor.GetFloat();
-
             absorption = highVolume && (AbsorptionUseATR.GetYesNo() ? lowMovementATR : lowMovementTicks);
 
             if (absorption && ShowAbsorptionHighlights.GetYesNo())
@@ -434,98 +535,74 @@ SCSFExport scsf_AdvancedOrderFlowTrapAnalyzer(SCStudyInterfaceRef sc)
 
         if (EnableTraps.GetYesNo() && EnableDelta.GetYesNo())
         {
-            bool lowFollowThrough = false;
-            if (atr > 0.0)
-                lowFollowThrough = priceMove <= atr * LowFollowThroughATRFactor.GetFloat();
-            else
-                lowFollowThrough = priceMove <= AbsorptionMinMovementTicks.GetInt() * sc.TickSize;
+            const bool lowFollowThrough = atr > 0.0
+                ? priceMove <= atr * LowFollowThroughATRFactor.GetFloat()
+                : priceMove <= AbsorptionMinMovementTicks.GetInt() * sc.TickSize;
 
-            bool longTrap = deltaPct >= DeltaTrapThreshold.GetFloat()
-                && sc.Close[i] < cluster.VWAP
-                && lowFollowThrough
-                && totalVolume >= MinimumVolumeForDeltaSignal.GetInt();
+            const bool highEnoughVolume = totalVolume >= MinimumVolumeForDeltaSignal.GetInt();
+            const bool buyersFailed = deltaPct >= DeltaTrapThreshold.GetFloat() && sc.Close[i] < cluster.VWAP;
+            const bool sellersFailed = deltaPct <= -DeltaTrapThreshold.GetFloat() && sc.Close[i] > cluster.VWAP;
 
-            bool shortTrap = deltaPct <= -DeltaTrapThreshold.GetFloat()
-                && sc.Close[i] > cluster.VWAP
-                && lowFollowThrough
-                && totalVolume >= MinimumVolumeForDeltaSignal.GetInt();
+            double score = 0.0;
+            if (fabs(deltaPct) >= DeltaTrapThreshold.GetFloat()) score += 1.0;
+            if (buyersFailed || sellersFailed) score += 1.0;
+            if (lowFollowThrough) score += 1.0;
+            if (highEnoughVolume) score += 1.0;
+            if (absorption) score += ScoreAbsorptionBonus.GetFloat();
+            if (extremeDelta) score += ScoreExtremeDeltaBonus.GetFloat();
+            if (EnableSessionVWAP.GetYesNo() && SessionVWAP[i] != 0.0f && fabs(sc.Close[i] - SessionVWAP[i]) <= max(sc.TickSize * 8.0, atr * 0.25)) score += 0.5;
+            score = AOFTA_Clamp(score, 0.0, 8.0);
+            TrapScore[i] = static_cast<float>(score);
+
+            bool longTrap = buyersFailed && lowFollowThrough && highEnoughVolume && score >= MinimumTrapScore.GetFloat();
+            bool shortTrap = sellersFailed && lowFollowThrough && highEnoughVolume && score >= MinimumTrapScore.GetFloat();
+
+            bool longConfirmed = !RequireReversalConfirmation.GetYesNo();
+            bool shortConfirmed = !RequireReversalConfirmation.GetYesNo();
 
             if (RequireReversalConfirmation.GetYesNo())
             {
                 const int lookahead = ReversalLookaheadBars.GetInt();
-                bool longConfirmed = false;
-                bool shortConfirmed = false;
+                longConfirmed = false;
+                shortConfirmed = false;
 
                 for (int j = 1; j <= lookahead && i + j < arraySize; ++j)
                 {
-                    if (sc.Close[i + j] < sc.Close[i])
+                    if (sc.Close[i + j] < sc.Low[i])
                         longConfirmed = true;
-                    if (sc.Close[i + j] > sc.Close[i])
+                    if (sc.Close[i + j] > sc.High[i])
                         shortConfirmed = true;
                 }
-
-                longTrap = longTrap && longConfirmed;
-                shortTrap = shortTrap && shortConfirmed;
             }
 
             if (longTrap)
             {
                 LongTrapSignal[i] = static_cast<float>(sc.High[i] + markerOffset);
-
+                if (longConfirmed)
+                    ConfirmedLongTrap[i] = static_cast<float>(sc.High[i] + markerOffset * 1.8);
                 if (ShowTrapLabels.GetYesNo())
-                {
-                    s_UseTool tool;
-                    tool.Clear();
-                    tool.ChartNumber = sc.ChartNumber;
-                    tool.DrawingType = DRAWING_TEXT;
-                    tool.Region = 0;
-                    tool.BeginIndex = i;
-                    tool.BeginValue = sc.High[i] + markerOffset * 2.0;
-                    tool.Color = RGB(255, 80, 80);
-                    tool.FontSize = 8;
-                    tool.AddMethod = UTAM_ADD_OR_ADJUST;
-                    tool.LineNumber = 100000 + i;
-                    tool.Text = "TRAP LONG";
-                    sc.UseTool(tool);
-                }
+                    AOFTA_DrawText(sc, 100000 + i, i, sc.High[i] + markerOffset * 2.6, RGB(255, 80, 80), longConfirmed ? "CONF LONG TRAP" : "LONG TRAP");
+                if (EnableAlerts.GetYesNo() && longConfirmed && sc.GetBarHasClosedStatus(i) == BHCS_BAR_HAS_CLOSED)
+                    sc.SetAlert(AlertNumber.GetInt(), "AOFTA Confirmed Long Trap");
             }
 
             if (shortTrap)
             {
                 ShortTrapSignal[i] = static_cast<float>(sc.Low[i] - markerOffset);
-
+                if (shortConfirmed)
+                    ConfirmedShortTrap[i] = static_cast<float>(sc.Low[i] - markerOffset * 1.8);
                 if (ShowTrapLabels.GetYesNo())
-                {
-                    s_UseTool tool;
-                    tool.Clear();
-                    tool.ChartNumber = sc.ChartNumber;
-                    tool.DrawingType = DRAWING_TEXT;
-                    tool.Region = 0;
-                    tool.BeginIndex = i;
-                    tool.BeginValue = sc.Low[i] - markerOffset * 2.0;
-                    tool.Color = RGB(80, 255, 120);
-                    tool.FontSize = 8;
-                    tool.AddMethod = UTAM_ADD_OR_ADJUST;
-                    tool.LineNumber = 200000 + i;
-                    tool.Text = "TRAP SHORT";
-                    sc.UseTool(tool);
-                }
+                    AOFTA_DrawText(sc, 200000 + i, i, sc.Low[i] - markerOffset * 2.6, RGB(80, 255, 120), shortConfirmed ? "CONF SHORT TRAP" : "SHORT TRAP");
+                if (EnableAlerts.GetYesNo() && shortConfirmed && sc.GetBarHasClosedStatus(i) == BHCS_BAR_HAS_CLOSED)
+                    sc.SetAlert(AlertNumber.GetInt(), "AOFTA Confirmed Short Trap");
             }
         }
 
         if (EnableDebugLogging.GetYesNo() && sc.GetBarHasClosedStatus(i) == BHCS_BAR_HAS_CLOSED)
         {
             SCString msg;
-            msg.Format("AOFTA bar=%d vol=%.0f delta=%.0f deltaPct=%.3f vwap=%.5f poc=%.5f eff=%.8f atr=%.5f absorption=%d",
-                i,
-                totalVolume,
-                delta,
-                deltaPct,
-                cluster.VWAP,
-                cluster.POC,
-                efficiency,
-                atr,
-                absorption ? 1 : 0);
+            msg.Format("AOFTA bar=%d vol=%.0f delta=%.0f deltaPct=%.3f vwap=%.5f poc=%.5f sessionVWAP=%.5f eff=%.8f atr=%.5f score=%.2f absorption=%d",
+                i, totalVolume, delta, deltaPct, cluster.VWAP, cluster.POC, SessionVWAP[i], efficiency, atr, TrapScore[i], AbsorptionSignal[i] != 0.0f ? 1 : 0);
             sc.AddMessageToLog(msg, 0);
         }
     }
